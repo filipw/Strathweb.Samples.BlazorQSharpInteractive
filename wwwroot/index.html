@@ -1,0 +1,28 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width">
+    <base href="/" />
+    <link href="css/bootstrap/bootstrap.min.css" rel="stylesheet" />
+    <link href="css/site.css" rel="stylesheet" />
+</head>
+<body>
+    <div id="app">Loading...</div>
+    <script>
+        // todo: couldn't find a better way to wait for a razor element to load
+        setTimeout(() => {
+            input.onkeydown = handleSpecialKeys
+        }, 1000);
+        function handleSpecialKeys(event) {
+            if (event.key == "ArrowDown" || event.key == "ArrowUp") {
+                event.preventDefault();
+            } 
+            else if(event.key == "Escape") {
+                event.srcElement.value = ""
+            }
+        }
+    </script>
+    <script src="_framework/blazor.webassembly.js"></script>
+</body>
+</html>

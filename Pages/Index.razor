@@ -1,0 +1,175 @@
+﻿@layout MainLayout
+@inject NavigationManager navigationManager
+@page "/"
+@using BlazorQSharpInteractive
+@using Microsoft.Quantum.QsCompiler
+
+<div id="outer-screen">
+  <div id="inner-screen">
+    <div id="output-outer"><div id="output">@((MarkupString)Output)</div></div>
+    <div id="blank-line">&nbsp;</div>
+    <div id="input-row">
+      <span>&gt;&nbsp;</span><input id="input" @bind="Input" type="text" @onkeydown="OnKeyDown" @onkeyup="Run" autofocus />
+    </div>
+  </div>
+</div>
+
+@functions {
+
+        public string Output { get; set; } = "";
+        public string Input { get; set; } = "";
+        private IEnumerable<MetadataReference> _csharpMetadataReferences;
+        private IEnumerable<string> _qsharpReferences;
+
+        protected async override Task OnInitializedAsync()
+        {
+            var refs = AppDomain.CurrentDomain.GetAssemblies();
+            var client = new HttpClient 
+            {
+                 BaseAddress = new Uri(navigationManager.BaseUri)
+            };
+
+            // necessary references to compile our Q# program
+            var qsharpReferences = new string[]
+            {
+                "Microsoft.Quantum.QSharp.Core",
+                "Microsoft.Quantum.Runtime.Core",
+            }.Select(x => Assembly.Load(new AssemblyName(x))).Select(a => a.Location);
+            _qsharpReferences = qsharpReferences;
+
+            // necessary references to compile C# simulation of the Q# compilation
+            var csharpReferences = new string[]
+            {
+                "Microsoft.Quantum.QSharp.Core",
+                "Microsoft.Quantum.Runtime.Core",
+                "Microsoft.Quantum.Simulators",
+                "Microsoft.Quantum.EntryPointDriver",
+                "System.CommandLine",
+                "System.Runtime",
+                "netstandard",
+                "System.Collections.Immutable",
+                typeof(object).Assembly.FullName,
+            }.Select(x => Assembly.Load(new AssemblyName(x))).Select(a => a.Location);
+
+            var csharpMetadataReferences = new List<MetadataReference>();
+            foreach(var csharpReference in csharpReferences)
+            {
+                var stream = await client.GetStreamAsync($"_framework/{csharpReference}");
+                csharpMetadataReferences.Add(MetadataReference.CreateFromStream(stream));
+            }
+            _csharpMetadataReferences = csharpMetadataReferences;
+        }
+
+        public void OnKeyDown(KeyboardEventArgs e)
+        {
+        }
+
+        public async Task Run(KeyboardEventArgs e)
+        {
+            if (e.Key != "Enter")
+            {
+                return;
+            }
+
+            var code = Input;
+            Input = "";
+
+            await RunSubmission(code);
+        }
+
+        private async Task RunSubmission(string code)
+        {
+            //Output += $@"<br /><span class=""info"">{HttpUtility.HtmlEncode(code)}</span>";
+            Output += $@"<br /><span class=""info"">Running code...</span>";
+
+            var previousOut = Console.Out;
+            try
+            {
+                if (TryCompile(code, out var script))
+                {
+                    var writer = new StringWriter();
+                    Console.SetOut(writer);
+
+
+                    var output = HttpUtility.HtmlEncode(writer.ToString());
+                    if (!string.IsNullOrWhiteSpace(output)) 
+                    {
+                        Output += $"<br />{output}";
+                    }
+                } 
+                else 
+                {
+                    Output += $@"<br / ><span class=""error"">There was a compilation error...</span>";
+                }
+            }
+            catch (Exception ex)
+            {
+                Output += $@"<br /><span class=""error"">{HttpUtility.HtmlEncode(CSharpObjectFormatter.Instance.FormatException(ex))}</span>";
+            }
+            finally 
+            {
+                Console.SetOut(previousOut);
+            }
+        }
+
+        private bool TryCompile(string qsharpCode, out Assembly assembly)
+        {
+            assembly = null;
+            
+            // to load our custom rewrite step, we need to point Q# compiler config at our current assembly
+            var config = new CompilationLoader.Configuration
+            {
+                IsExecutable = true,
+                RewriteSteps = new List<(string, string)>
+                {
+                    ( Assembly.GetExecutingAssembly().Location, null),
+                }
+            };
+
+            // compile Q# code
+            var compilationLoader = new CompilationLoader(
+                loadFromDisk => new Dictionary<Uri, string> { { new Uri(Path.GetFullPath("__CODE_SNIPPET__.qs")), qsharpCode } }.ToImmutableDictionary(), 
+                    _qsharpReferences, options: config, logger: new ConsoleLogger());
+
+            // print any diagnostics
+            if (compilationLoader.LoadDiagnostics.Any())
+            {
+                Console.WriteLine("Diagnostics:" + Environment.NewLine + string.Join(Environment.NewLine, compilationLoader.LoadDiagnostics.Select(d => $"{d.Severity} {d.Code} {d.Message}")));
+
+                // if there are any errors, exit
+                if (compilationLoader.LoadDiagnostics.Any(d => d.Severity == Microsoft.VisualStudio.LanguageServer.Protocol.DiagnosticSeverity.Error))
+                {
+                    return false;
+                }
+            }
+
+            // we captured the emitted C# syntax trees into a static variable in the rewrite step
+            var syntaxTrees = InMemoryEmitter.GeneratedFiles.Select(x => CSharpSyntaxTree.ParseText(x.Value));
+
+            // compile C# code
+            // make sure to pass in the C# references as Roslyn's metadata references
+            var csharpCompilation = CSharpCompilation.Create("hello-qsharp", syntaxTrees)
+                .WithReferences(_csharpMetadataReferences);
+
+            // print any diagnostics
+            var csharpDiagnostics = csharpCompilation.GetDiagnostics().Where(d => d.Severity != DiagnosticSeverity.Hidden);
+            if (csharpDiagnostics.Any())
+            {
+                Console.WriteLine("C# Diagnostics:" + Environment.NewLine + string.Join(Environment.NewLine, csharpDiagnostics.Select(d => $"{d.Severity} {d.Id} {d.GetMessage()}")));
+
+                // if there are any errors, exit
+                if (csharpDiagnostics.Any(d => d.Severity == DiagnosticSeverity.Error))
+                {
+                    return false;
+                }
+            }
+
+            // emit C# code into an in memory assembly
+            using var peStream = new MemoryStream();
+            var emitResult = csharpCompilation.Emit(peStream);
+            peStream.Position = 0;
+            // run the assembly using reflection
+            assembly = Assembly.Load(peStream.ToArray());
+            return true;
+        }
+}
